@@ -10,6 +10,7 @@ use serde::Deserialize;
 use std::cell::Cell;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
+use yewdux::mrc::Mrc;
 
 use gloo_timers::callback::Interval;
 pub struct Timer {
@@ -22,7 +23,7 @@ impl Store for Timer {
             Dispatch::<Timer>::new().reduce(|timer| timer);
         };
         Timer {
-            _interval: Interval::new(100, interval),
+            _interval: Interval::new(50, interval),
         }
     }
     fn should_notify(&self, _old: &Self) -> bool {
@@ -31,16 +32,37 @@ impl Store for Timer {
 }
 #[derive(Default, Clone)]
 struct Travel {
-    to: Option<Airport>,
+    to: Mrc<Airport>,
     duration: Cell<usize>,
 }
-impl Travel {
-    fn goto(&mut self, a: Airport, duration: usize) {
-        self.to = Some(a);
-        self.duration = duration.into();
+
+impl Display for Travel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Traveling to {}, time left: {}",
+            self.to.borrow().deref(),
+            self.duration.get()
+        )
     }
 }
-impl Store for Travel {
+#[derive(Default, Clone)]
+struct Travels {
+    travels: Vec<Travel>,
+}
+impl Travels {
+    fn goto(&mut self, a: Mrc<Airport>, duration: usize) {
+        a.borrow_mut().status = Visited::Visiting;
+        self.travels.push(Travel {
+            to: a.clone(),
+            duration: Cell::new(duration),
+        });
+
+        // self.to = Some(a);
+        //self.duration = duration.into();
+    }
+}
+impl Store for Travels {
     fn new() -> Self {
         Default::default()
     }
@@ -50,18 +72,23 @@ impl Store for Travel {
 }
 #[function_component(Travelling)]
 fn travelling() -> html {
-    let (travel, dp) = use_store::<Travel>();
+    let (travel, dp) = use_store::<Travels>();
     let _ = use_store::<Timer>();
-    if let Some(airport) = &travel.to {
-        if travel.duration.get() == 0 {
+    if let Some(current) = &travel.travels.get(0) {
+        if current.duration.get() == 0 {
             // we arrived
-            Dispatch::<Location>::new().reduce_mut(|l| l.goto(travel.to.clone().unwrap()));
-            dp.reduce_mut(|t| t.to.take());
+            Dispatch::<Location>::new().reduce_mut(|l| l.goto(current.to.clone()));
+            dp.reduce_mut(|t| t.travels.remove(0));
         } else {
-            travel.duration.set(travel.duration.get() - 1);
+            current.duration.set(current.duration.get() - 1);
         }
+        let html = travel.travels.iter().map(|travel| {
+            html! { <p> {travel}</p>}
+        });
         html! {
-            <p>  {format!("Traveling to {}, time left: {}", airport, travel.duration.get())} </p>
+        <div>
+            {html.collect::<Vec<_>>()}
+        </div>
         }
     } else {
         html! {}
@@ -70,7 +97,7 @@ fn travelling() -> html {
 
 #[derive(Clone, Default, PartialEq)]
 struct Location {
-    airport: Airport,
+    airport: Mrc<Airport>,
 }
 impl Store for Location {
     fn new() -> Self {
@@ -83,25 +110,27 @@ impl Store for Location {
     }
 }
 impl Location {
-    fn goto(&mut self, a: Airport) {
+    fn goto(&mut self, a: Mrc<Airport>) {
+        a.borrow_mut().status = Visited::Visited;
         self.airport = a;
-        Dispatch::<Options>::new().set(Default::default());
+        // Dispatch::<Options>::new().set(Default::default());
     }
 }
+use std::ops::Deref;
 #[function_component(ShowLocation)]
 fn show_location() -> html {
     let (loc, _) = use_store::<Location>();
     //let (_, _) = use_store::<Airports>();
-    let airport = &loc.airport;
+    let airport = &loc.airport.borrow();
     eval(format!(
-        "document.map.setView([{},{}], 8);
+        "document.map.setView([{},{}], 5);
         var marker = L.marker([{}, {}]).addTo(document.map);
         ",
         airport.lat, airport.long, airport.lat, airport.long,
     ));
-    show_options_for(airport.clone());
+    // show_options_for(airport.clone());
     html! {
-        <p> {format!("You are in {}", airport)} </p>
+        <p> {format!("You are in {}", airport.deref())} </p>
     }
 }
 #[derive(Clone, Default, PartialEq)]
@@ -136,7 +165,7 @@ struct Route {
 
 #[derive(Default, Clone)]
 struct Airports {
-    airports: HashMap<String, Airport>,
+    airports: HashMap<String, Mrc<Airport>>,
 }
 impl Store for Airports {
     fn new() -> Self {
@@ -151,7 +180,7 @@ impl Store for Airports {
             // assert!(x.len() == 1);
             Dispatch::<Airports>::new().reduce_mut(move |dp| {
                 for airport in x {
-                    dp.add(airport.clone());
+                    dp.add(airport);
                 }
             });
         });
@@ -162,7 +191,7 @@ impl Store for Airports {
     }
 }
 impl Airports {
-    fn get(&self, iata_code: &String) -> Airport {
+    fn get(&self, iata_code: &String) -> Mrc<Airport> {
         if self.airports.is_empty() {
             // not initialized
             Default::default()
@@ -172,7 +201,7 @@ impl Airports {
     }
     fn add(&mut self, airport: Airport) {
         let iata_code = airport.iata_code.clone();
-        self.airports.insert(iata_code, airport);
+        self.airports.insert(iata_code, Mrc::new(airport));
     }
 }
 use std::fmt::Display;
@@ -181,12 +210,21 @@ impl Display for Airport {
         write!(f, "{} ({})", self.name, self.iata_code)
     }
 }
-#[derive(Deserialize, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug, Default)]
+enum Visited {
+    Visited,
+    Visiting,
+    #[default]
+    NotVisited,
+}
+#[derive(Deserialize, PartialEq, Debug)]
 struct Airport {
     name: String,
     iata_code: String,
     lat: String,
     long: String,
+    #[serde(skip)]
+    status: Visited,
 }
 impl Default for Airport {
     fn default() -> Self {
@@ -195,6 +233,7 @@ impl Default for Airport {
             name: "Dusseldorf".to_string(),
             lat: "0".into(),
             long: "0".into(),
+            status: Default::default(),
         }
     }
 }
@@ -214,8 +253,6 @@ fn model() -> html {
             <ShowOptions/>
             </div>
         <Map/>
-
-
         </div>
     }
 }
@@ -234,8 +271,9 @@ fn init_map() -> html {
     );
     html! {}
 }
-fn show_options_for(s: Airport) {
+fn show_options_for(airport: Mrc<Airport>) {
     spawn_local(async move {
+        let airport = airport.borrow();
         // go on, inject yourself...
         let q = format!(
             "
@@ -244,48 +282,76 @@ fn show_options_for(s: Airport) {
                 where dep_iata = '{}'
                 group by arr_iata
                 ;",
-            &s.iata_code
+            &airport.iata_code
         );
         info!("Query: {}", q);
         let res = query(q);
         let res = get_from_js(res).await.unwrap();
-        let x: Vec<Route> = JsValue::into_serde(&res).unwrap();
+        let x: Vec<Route> = JsValue::into_serde(&res).unwrap_or_else(|res| {
+            info!("{}", res);
+            panic!("Failed unwraping")
+        });
         Dispatch::<Options>::new().set(Options { options: x });
     });
 }
 #[function_component(GetOptions)]
 fn get_options() -> html {
-    let onclick = Callback::from(|_| {
-        let current = Dispatch::<Location>::new().get();
-        show_options_for(current.airport.clone());
-    });
+    let prev = use_state(|| Mrc::new(Airport::default()));
+    let (travels, dp) = use_store::<Travels>();
+    let _ = use_store::<Location>();
+    //let onclick = Callback::from(move |_| {
+    // let current = Dispatch::<Location>::new().get();
+    let last_travel = travels.travels.last();
+    if let Some(travel) = last_travel {
+        if *prev != travel.to {
+            prev.set(travel.to.clone());
+            // info!("To, {}", travel.to.);
+            show_options_for(travel.to.clone());
+        }
+    } else {
+        let loc = Dispatch::<Location>::new().get();
+        // info!("Empty, {}", loc.airport.borrow());
+        show_options_for(loc.airport.clone());
+    }
+
+    //});
+    /*
     html! {
        <div>
        <button {onclick}>{"Search"}</button>
        </div>
     }
+    */
+    html! {}
 }
 
 #[function_component(ShowOptions)]
 fn options() -> html {
     let (options, _) = use_store::<Options>();
     let (airports, _) = use_store::<Airports>();
+    let _ = use_store::<Location>();
     // let airports = airports..borrow();
     let options = options.options.iter().map(|option| {
         let dep_airport = airports.get(&option.dep_iata);
         let arr_airport = airports.get(&option.arr_iata);
         let text = format!(
             "From {} to {} at {}, duration {}m",
-            dep_airport.iata_code, arr_airport, option.dep_time, option.duration
+            dep_airport.borrow().iata_code, arr_airport.borrow().deref(), option.dep_time, option.duration
         );
         let duration = option.duration;
+
+        let class = match arr_airport.borrow().status  {
+        Visited::Visited =>  classes!("bg-green-400"),
+            Visited::Visiting => classes!("bg-yellow-400"),
+            Visited::NotVisited => classes!(),
+        };
         let onclick = Callback::once(move |_| {
             // Dispatch::<Location>::new().reduce_mut(|loc| loc.goto(arr_airport));
-           Dispatch::<Travel>::new().reduce_mut(|loc| loc.goto(arr_airport, duration));
+           Dispatch::<Travels>::new().reduce_mut(|loc| loc.goto(arr_airport, duration));
         });
         html! {
             <div>
-                <p> {text}
+                <p {class}> {text}
                 <button class="bg-blue-100 hover:bg-blue-300 border-solid  px-4 rounded" {onclick}>{"Travel"} </button>
                 </p>
             </div>
