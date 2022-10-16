@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use log::info;
 use yew::function_component;
@@ -32,8 +33,10 @@ impl Store for Timer {
 }
 #[derive(Default, Clone)]
 struct Travel {
+    from: Mrc<Airport>,
     to: Mrc<Airport>,
     duration: Cell<usize>,
+    max_duration: usize,
 }
 
 impl Display for Travel {
@@ -51,11 +54,13 @@ struct Travels {
     travels: Vec<Travel>,
 }
 impl Travels {
-    fn goto(&mut self, a: Mrc<Airport>, duration: usize) {
-        a.borrow_mut().status = Visited::Visiting;
+    fn goto(&mut self, to: Mrc<Airport>, from: Mrc<Airport>, duration: usize) {
+        to.borrow_mut().status = Visited::Visiting;
         self.travels.push(Travel {
-            to: a.clone(),
+            to: to.clone(),
+            from: from.clone(),
             duration: Cell::new(duration),
+            max_duration: duration,
         });
 
         // self.to = Some(a);
@@ -80,7 +85,22 @@ fn travelling() -> html {
             Dispatch::<Location>::new().reduce_mut(|l| l.goto(current.to.clone()));
             dp.reduce_mut(|t| t.travels.remove(0));
         } else {
+            // TODO show flyng position
             current.duration.set(current.duration.get() - 1);
+            let progress = 1.0 - current.duration.get() as f64 / current.max_duration as f64;
+            //info!("Progress: {}", progress);
+            let from = current.from.borrow();
+            let to = current.to.borrow();
+            let lat = from.lat() + (to.lat() - from.lat()) * progress;
+            let long = from.long() + (to.long() - from.long()) * progress;
+            //info!("Position: {}, {}", lat, long);
+            eval(format!(
+                "
+                document.circle.setLatLng([{},{}]);
+                document.map.setView([{}, {}, 5])
+                ",
+                lat, long, lat, long
+            ));
         }
         let html = travel.travels.iter().map(|travel| {
             html! { <p> {travel}</p>}
@@ -110,9 +130,14 @@ impl Store for Location {
     }
 }
 impl Location {
-    fn goto(&mut self, a: Mrc<Airport>) {
-        a.borrow_mut().status = Visited::Visited;
-        self.airport = a;
+    fn goto(&mut self, airport: Mrc<Airport>) {
+        let x = airport.clone();
+        Dispatch::<Stats>::new().reduce(|stats| {
+            stats.visit(x);
+            stats
+        });
+        airport.borrow_mut().status = Visited::Visited;
+        self.airport = airport;
         // Dispatch::<Options>::new().set(Default::default());
     }
 }
@@ -171,7 +196,7 @@ impl Store for Airports {
     fn new() -> Self {
         spawn_local(async move {
             let res = query(
-                " select iata_code, name, lat,long
+                " select iata_code, name, lat,long, country_code
                      from airports"
                     .to_string(),
             );
@@ -183,6 +208,8 @@ impl Store for Airports {
                     dp.add(airport);
                 }
             });
+            let start = Dispatch::<Airports>::new().get().get(&"FRA".to_string());
+            Dispatch::<Location>::new().reduce_mut(|loc| loc.goto(start));
         });
         Default::default()
     }
@@ -219,6 +246,7 @@ enum Visited {
 }
 #[derive(Deserialize, PartialEq, Debug)]
 struct Airport {
+    country_code: String,
     name: String,
     iata_code: String,
     lat: String,
@@ -226,9 +254,18 @@ struct Airport {
     #[serde(skip)]
     status: Visited,
 }
+impl Airport {
+    fn lat(&self) -> f64 {
+        self.lat.parse::<f64>().unwrap()
+    }
+    fn long(&self) -> f64 {
+        self.long.parse::<f64>().unwrap()
+    }
+}
 impl Default for Airport {
     fn default() -> Self {
         Airport {
+            country_code: "GER".to_string(),
             iata_code: "DUS".to_string(),
             name: "Dusseldorf".to_string(),
             lat: "0".into(),
@@ -248,6 +285,7 @@ fn model() -> html {
                 <div id="map"/>
             </div>
             <div>
+            <ShowStats/>
             <Travelling/>
             <GetOptions/>
             <ShowOptions/>
@@ -266,6 +304,10 @@ fn init_map() -> html {
         maxZoom: 19,
         attribution: '&copy; <a href=\"http://www.openstreetmap.org/copyright\">OpenStreetMap</a>'
     }).addTo(document.map);
+    var circle = L.circle([0,0]).addTo(document.map);
+            document.circle = circle;
+
+
                 "
         .into(),
     );
@@ -334,11 +376,21 @@ fn options() -> html {
     let options = options.options.iter().map(|option| {
         let dep_airport = airports.get(&option.dep_iata);
         let arr_airport = airports.get(&option.arr_iata);
-        let text = format!(
-            "From {} to {} at {}, duration {}m",
-            dep_airport.borrow().iata_code, arr_airport.borrow().deref(), option.dep_time, option.duration
-        );
+        let travel = format!(
+            "From {} to {} at {},",
+            dep_airport.borrow().iata_code, arr_airport.borrow().deref(), option.dep_time        );
         let duration = option.duration;
+        let duration_text = format!(", duration: {}m", duration);
+        let arr_country = arr_airport.borrow().country_code.clone();
+        let country_visited = Dispatch::<Stats>::new().get().visited_country(&arr_country);
+        let class = if country_visited  {
+            classes!("bg-green-400")
+            } else {
+            Default::default()
+        };
+        let country = html! {
+            <span {class}> {arr_country}</span>
+        };
 
         let class = match arr_airport.borrow().status  {
         Visited::Visited =>  classes!("bg-green-400"),
@@ -347,12 +399,12 @@ fn options() -> html {
         };
         let onclick = Callback::once(move |_| {
             // Dispatch::<Location>::new().reduce_mut(|loc| loc.goto(arr_airport));
-           Dispatch::<Travels>::new().reduce_mut(|loc| loc.goto(arr_airport, duration));
+           Dispatch::<Travels>::new().reduce_mut(|loc| loc.goto(arr_airport, dep_airport, duration));
         });
         html! {
             <div>
-                <p {class}> {text}
-                <button class="bg-blue-100 hover:bg-blue-300 border-solid  px-4 rounded" {onclick}>{"Travel"} </button>
+                <p > <span {class}>  {travel}</span> {country} {duration_text}
+                    <button class="bg-blue-100 hover:bg-blue-300 border-solid  px-4 rounded" {onclick}>{"Travel"} </button>
                 </p>
             </div>
 
@@ -365,6 +417,41 @@ fn options() -> html {
         {options.collect::<Vec<_>>()}
 
         </div>
+    }
+}
+#[derive(Default)]
+struct Stats {
+    visited_airports: Cell<usize>,
+    visited_countries: Mrc<HashSet<String>>,
+}
+impl Store for Stats {
+    fn new() -> Self {
+        Default::default()
+    }
+    fn should_notify(&self, old: &Self) -> bool {
+        true
+    }
+}
+impl Stats {
+    fn visit(&self, airport: Mrc<Airport>) {
+        if airport.borrow().status != Visited::Visited {
+            self.visited_airports.set(self.visited_airports.get() + 1);
+        }
+        self.visited_countries
+            .borrow_mut()
+            .insert(airport.borrow().country_code.clone());
+    }
+    fn visited_country(&self, country_code: &str) -> bool {
+        self.visited_countries.borrow().contains(country_code)
+    }
+}
+#[function_component(ShowStats)]
+fn show_stats() -> html {
+    let (stats, _) = use_store::<Stats>();
+    let (_, _) = use_store::<Airports>();
+    html! {
+        <p> {format!("Visited: {} airports, {} countries", stats.visited_airports.get(), stats.visited_countries.borrow().len())}
+        </p>
     }
 }
 
