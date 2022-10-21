@@ -89,12 +89,18 @@ fn travelling() -> html {
             // show flyng position on map
             current.duration.set(current.duration.get() - speed);
             let progress = 1.0 - current.duration.get() as f64 / current.max_duration as f64;
-            //info!("Progress: {}", progress);
-            // TODO this breaks when crossing the 180th meridian
             let from = current.from.borrow();
             let to = current.to.borrow();
-            let mut lat = from.lat() + (to.lat() - from.lat()) * progress;
-            let long = from.long() + (to.long() - from.long()) * progress;
+            let lat = from.lat() + (to.lat() - from.lat()) * progress;
+            let mut long = from.long() + (to.long() - from.long()) * progress;
+            // Fixing crossing the date line
+            let diff = to.long() - from.long();
+            if diff < -180.0 {
+                long += 360.0 * progress;
+            }
+            if diff > 180.0 {
+                long -= 360.0 * progress;
+            }
             //info!("Position: {}, {}", lat, long);
             eval(format!(
                 " document.circle.setLatLng([{},{}]);
@@ -226,7 +232,7 @@ impl Store for Airports {
                     dp.add(airport);
                 }
             });
-            let start = Dispatch::<Airports>::new().get().get(&"FRA".to_string());
+            let start = Dispatch::<Airports>::new().get().get(&"HND".to_string());
             Dispatch::<Location>::new().reduce_mut(|loc| loc.goto(start));
         });
         Default::default()
