@@ -9,7 +9,10 @@ const workerUrl = new URL(
 const wasmUrl = new URL("sql.js-httpvfs/dist/sql-wasm.wasm", import.meta.url);
 
 async function query(query: string) {
-  const worker = await createDbWorker(
+  // I really don't know typescript...
+  if (!(window as any).worker) {
+    
+    const worker = await createDbWorker(
     [
       {
         from: "inline",
@@ -23,9 +26,12 @@ async function query(query: string) {
     workerUrl.toString(),
     wasmUrl.toString()
   );
+  
+  (window as any).worker = worker;
+  }
 
-  const result = await worker.db.query(query);
-  console.log("It worked!");
+  const result = await (window as any).worker.db.query(query);
+  console.log("It's really new!");
 
   return result;
 }
