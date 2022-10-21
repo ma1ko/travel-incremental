@@ -77,28 +77,28 @@ impl Store for Travels {
 }
 #[function_component(Travelling)]
 fn travelling() -> html {
+    let speed = 10;
     let (travel, dp) = use_store::<Travels>();
     let _ = use_store::<Timer>();
     if let Some(current) = &travel.travels.get(0) {
-        if current.duration.get() == 0 {
+        if current.duration.get() <= speed {
             // we arrived
             Dispatch::<Location>::new().reduce_mut(|l| l.goto(current.to.clone()));
             dp.reduce_mut(|t| t.travels.remove(0));
         } else {
-            // TODO show flyng position
-            current.duration.set(current.duration.get() - 1);
+            // show flyng position on map
+            current.duration.set(current.duration.get() - speed);
             let progress = 1.0 - current.duration.get() as f64 / current.max_duration as f64;
             //info!("Progress: {}", progress);
+            // TODO this breaks when crossing the 180th meridian
             let from = current.from.borrow();
             let to = current.to.borrow();
-            let lat = from.lat() + (to.lat() - from.lat()) * progress;
+            let mut lat = from.lat() + (to.lat() - from.lat()) * progress;
             let long = from.long() + (to.long() - from.long()) * progress;
             //info!("Position: {}, {}", lat, long);
             eval(format!(
-                "
-                document.circle.setLatLng([{},{}]);
-                document.map.setView([{}, {}, 5])
-                ",
+                " document.circle.setLatLng([{},{}]);
+                document.map.setView([{}, {}, 5]) ",
                 lat, long, lat, long
             ));
         }
@@ -149,8 +149,7 @@ fn show_location() -> html {
     let airport = &loc.airport.borrow();
     eval(format!(
         "document.map.setView([{},{}], 5);
-        var marker = L.marker([{}, {}]).addTo(document.map);
-        ",
+        var marker = L.marker([{}, {}]).addTo(document.map); ",
         airport.lat, airport.long, airport.lat, airport.long,
     ));
     // show_options_for(airport.clone());
@@ -161,6 +160,25 @@ fn show_location() -> html {
 #[derive(Clone, Default, PartialEq)]
 struct Options {
     options: Vec<Route>,
+}
+impl Options {
+    fn sort_by_duration(&mut self) {
+        self.options.sort_by(|a, b| a.duration.cmp(&b.duration));
+    }
+    fn sort_visited(&mut self) {
+        self.options.sort_by(|a, b| {
+            let airports = Dispatch::<Airports>::new().get();
+            let stats = Dispatch::<Stats>::new().get();
+
+            let a = airports.get(&a.arr_iata);
+            let a = a.borrow();
+            let b = airports.get(&b.arr_iata);
+            let b = b.borrow();
+            let a_country = stats.visited_country(&a.country_code);
+            let b_country = stats.visited_country(&b.country_code);
+            a_country.cmp(&b_country)
+        })
+    }
 }
 impl Store for Options {
     fn new() -> Self {
@@ -237,13 +255,20 @@ impl Display for Airport {
         write!(f, "{} ({})", self.name, self.iata_code)
     }
 }
-#[derive(Copy, Clone, PartialEq, Debug, Default)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default, PartialOrd, Ord)]
 enum Visited {
     Visited,
     Visiting,
     #[default]
     NotVisited,
 }
+/*
+impl Ord for Visited {
+    fn max(self, other: Self) -> Self
+    where
+        Self: Sized, {
+}
+*/
 #[derive(Deserialize, PartialEq, Debug)]
 struct Airport {
     country_code: String,
@@ -329,11 +354,21 @@ fn show_options_for(airport: Mrc<Airport>) {
         info!("Query: {}", q);
         let res = query(q);
         let res = get_from_js(res).await.unwrap();
-        let x: Vec<Route> = JsValue::into_serde(&res).unwrap_or_else(|res| {
+        let mut x: Vec<Route> = JsValue::into_serde(&res).unwrap_or_else(|res| {
             info!("{}", res);
             panic!("Failed unwraping")
         });
+        if x.len() == 0 {
+            info!("No way back, giving you an emergence route");
+            x.push(Route {
+                dep_iata: airport.iata_code.clone(),
+                dep_time: "0".into(),
+                arr_iata: "FRA".into(),
+                duration: 1000,
+            })
+        }
         Dispatch::<Options>::new().set(Options { options: x });
+        Dispatch::<Options>::new().reduce_mut(|options| options.sort_visited());
     });
 }
 #[function_component(GetOptions)]
