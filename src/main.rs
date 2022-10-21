@@ -137,26 +137,29 @@ impl Store for Location {
 }
 impl Location {
     fn goto(&mut self, airport: Mrc<Airport>) {
-        let x = airport.clone();
+        self.airport = airport;
+        let x = self.airport.clone();
         Dispatch::<Stats>::new().reduce(|stats| {
             stats.visit(x);
             stats
         });
-        airport.borrow_mut().status = Visited::Visited;
-        self.airport = airport;
+        self.airport.borrow_mut().status = Visited::Visited;
         // Dispatch::<Options>::new().set(Default::default());
+    }
+    fn set_marker(&self) {
+        let airport = self.airport.borrow_mut();
     }
 }
 use std::ops::Deref;
 #[function_component(ShowLocation)]
 fn show_location() -> html {
     let (loc, _) = use_store::<Location>();
+    let stats = Dispatch::<Stats>::new().get();
     //let (_, _) = use_store::<Airports>();
     let airport = &loc.airport.borrow();
     eval(format!(
-        "document.map.setView([{},{}], 5);
-        var marker = L.marker([{}, {}]).addTo(document.map); ",
-        airport.lat, airport.long, airport.lat, airport.long,
+        "document.map.setView([{},{}], 5);",
+        airport.lat, airport.long
     ));
     // show_options_for(airport.clone());
     html! {
@@ -170,6 +173,22 @@ struct Options {
 impl Options {
     fn sort_by_duration(&mut self) {
         self.options.sort_by(|a, b| a.duration.cmp(&b.duration));
+        self.options.reverse(); // Show routes with most points first
+    }
+    fn sort_by_points(&mut self) {
+        self.options.sort_by(|a, b| {
+            //  a.points.cmp(&b.points))
+
+            let airports = Dispatch::<Airports>::new().get();
+            let stats = Dispatch::<Stats>::new().get();
+
+            let a = airports.get(&a.arr_iata);
+            let a = a.borrow();
+            let b = airports.get(&b.arr_iata);
+            let b = b.borrow();
+            a.points.cmp(&b.points)
+        });
+        // self.options.reverse(); // Show routes with most points first
     }
     fn sort_visited(&mut self) {
         self.options.sort_by(|a, b| {
@@ -210,6 +229,42 @@ struct Route {
     arr_iata: String,
     // arr_time: String,
     duration: usize,
+    //    #[serde(default)]
+    //    _points: usize,
+}
+impl Route {
+    fn route_points(&mut self) {
+        let airports = Dispatch::<Airports>::new().get();
+        let dep = airports.get(&self.dep_iata);
+        let dep = dep.borrow();
+        let arr = airports.get(&self.arr_iata);
+        let arr = arr.borrow();
+        dep.lowest_neighbor_points
+            .set(dep.lowest_neighbor_points.get().min(arr.points.get()));
+    }
+    // Rate route based on target and duration
+    /*
+    fn points(&mut self) {
+        let airports = Dispatch::<Airports>::new().get();
+        let stats = Dispatch::<Stats>::new().get();
+        let dep = airports.get(&self.dep_iata);
+        let dep = dep.borrow();
+        let dep_country = dep.country_code.clone();
+        let arr = airports.get(&self.arr_iata);
+        let arr = arr.borrow();
+        let arr_country = arr.country_code.clone();
+        if !stats.visited_country(&arr_country) {
+            self.points += 1_000_000
+        };
+        if arr.status == Visited::NotVisited {
+            self.points += 100_000
+        };
+        if dep_country != arr_country {
+            self.points += 10000;
+        }
+        self.points += 10_000 - self.duration;
+    }
+    */
 }
 
 #[derive(Default, Clone)]
@@ -284,6 +339,10 @@ struct Airport {
     long: String,
     #[serde(skip)]
     status: Visited,
+    #[serde(skip)]
+    points: Cell<usize>,
+    #[serde(skip)]
+    lowest_neighbor_points: Cell<usize>,
 }
 impl Airport {
     fn lat(&self) -> f64 {
@@ -302,6 +361,8 @@ impl Default for Airport {
             lat: "0".into(),
             long: "0".into(),
             status: Default::default(),
+            points: 0.into(),
+            lowest_neighbor_points: 0.into(),
         }
     }
 }
@@ -314,6 +375,7 @@ fn model() -> html {
             <div>
                 <ShowLocation/>
                 <div id="map"/>
+                <Autoclicker/>
             </div>
             <div>
             <ShowStats/>
@@ -364,6 +426,9 @@ fn show_options_for(airport: Mrc<Airport>) {
             info!("{}", res);
             panic!("Failed unwraping")
         });
+        x.iter_mut().for_each(|x| x.route_points());
+
+        airport.points.set(airport.lowest_neighbor_points.get() + 1);
         if x.len() == 0 {
             info!("No way back, giving you an emergence route");
             x.push(Route {
@@ -371,16 +436,17 @@ fn show_options_for(airport: Mrc<Airport>) {
                 dep_time: "0".into(),
                 arr_iata: "FRA".into(),
                 duration: 1000,
+                // points: 0,
             })
         }
         Dispatch::<Options>::new().set(Options { options: x });
-        Dispatch::<Options>::new().reduce_mut(|options| options.sort_visited());
+        Dispatch::<Options>::new().reduce_mut(|options| options.sort_by_points());
     });
 }
 #[function_component(GetOptions)]
 fn get_options() -> html {
     let prev = use_state(|| Mrc::new(Airport::default()));
-    let (travels, dp) = use_store::<Travels>();
+    let (travels, _) = use_store::<Travels>();
     let _ = use_store::<Location>();
     //let onclick = Callback::from(move |_| {
     // let current = Dispatch::<Location>::new().get();
@@ -432,6 +498,7 @@ fn options() -> html {
         let country = html! {
             <span {class}> {arr_country}</span>
         };
+        let points = arr_airport.borrow().points.get();
 
         let class = match arr_airport.borrow().status  {
         Visited::Visited =>  classes!("bg-green-400"),
@@ -444,7 +511,7 @@ fn options() -> html {
         });
         html! {
             <div>
-                <p > <span {class}>  {travel}</span> {country} {duration_text}
+                <p > <span {class}>  {travel}</span> {country} {duration_text} {", "} {points}
                     <button class="bg-blue-100 hover:bg-blue-300 border-solid  px-4 rounded" {onclick}>{"Travel"} </button>
                 </p>
             </div>
@@ -469,7 +536,7 @@ impl Store for Stats {
     fn new() -> Self {
         Default::default()
     }
-    fn should_notify(&self, old: &Self) -> bool {
+    fn should_notify(&self, _old: &Self) -> bool {
         true
     }
 }
@@ -478,9 +545,20 @@ impl Stats {
         if airport.borrow().status != Visited::Visited {
             self.visited_airports.set(self.visited_airports.get() + 1);
         }
-        self.visited_countries
+        let new = self
+            .visited_countries
             .borrow_mut()
             .insert(airport.borrow().country_code.clone());
+        if new {
+            eval(format!(
+                "var marker = L.marker([{}, {}]).addTo(document.map); ",
+                airport.borrow().lat,
+                airport.borrow().long
+            ));
+            info!("Set marker");
+            // let location = Dispatch::<Location>::new().get();
+            // location.set_marker();
+        }
     }
     fn visited_country(&self, country_code: &str) -> bool {
         self.visited_countries.borrow().contains(country_code)
@@ -493,6 +571,55 @@ fn show_stats() -> html {
     html! {
         <p> {format!("Visited: {} airports, {} countries", stats.visited_airports.get(), stats.visited_countries.borrow().len())}
         </p>
+    }
+}
+use std::cell::RefCell;
+#[derive(Default)]
+struct AutoClicker {
+    // enabled: bool,
+    interval: RefCell<Option<Interval>>,
+}
+impl AutoClicker {
+    fn toggle(&self) {
+        let mut interval = self.interval.borrow_mut();
+        if let Some(_) = interval.as_ref() {
+            *interval = None;
+        } else {
+            *interval = Some(Interval::new(3000, || {
+                let route = Dispatch::<Options>::new().get().options[0].clone();
+                let airports = Dispatch::<Airports>::new().get();
+                Dispatch::<Travels>::new().reduce_mut(|loc| {
+                    loc.goto(
+                        airports.get(&route.arr_iata),
+                        airports.get(&route.dep_iata),
+                        route.duration,
+                    )
+                });
+            }))
+        }
+    }
+}
+impl Store for AutoClicker {
+    fn new() -> Self {
+        Self {
+            interval: RefCell::new(None),
+        }
+    }
+    fn should_notify(&self, _old: &Self) -> bool {
+        false
+    }
+}
+#[function_component(Autoclicker)]
+fn autoclicker() -> html {
+    let (clicker, dp) = use_store::<AutoClicker>();
+    let onclick = Callback::from(move |_| {
+        dp.reduce(|c| {
+            c.toggle();
+            c
+        });
+    });
+    html! {
+        <button {onclick}>{"Autoclicker"}</button>
     }
 }
 
