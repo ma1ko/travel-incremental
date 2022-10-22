@@ -14,6 +14,7 @@ use wasm_bindgen_futures::spawn_local;
 use yewdux::mrc::Mrc;
 
 use gloo_timers::callback::Interval;
+mod great_circle;
 pub struct Timer {
     _interval: Interval,
 }
@@ -55,7 +56,12 @@ struct Travels {
 }
 impl Travels {
     fn goto(&mut self, to: Mrc<Airport>, from: Mrc<Airport>, duration: usize) {
-        to.borrow_mut().status = Visited::Visiting;
+        {
+            let mut x = to.borrow_mut();
+            if x.status == Visited::NotVisited {
+                x.status = Visited::Visiting;
+            }
+        }
         self.travels.push(Travel {
             to: to.clone(),
             from: from.clone(),
@@ -77,7 +83,7 @@ impl Store for Travels {
 }
 #[function_component(Travelling)]
 fn travelling() -> html {
-    let speed = 10;
+    let speed = 3;
     let (travel, dp) = use_store::<Travels>();
     let _ = use_store::<Timer>();
     if let Some(current) = &travel.travels.get(0) {
@@ -88,7 +94,18 @@ fn travelling() -> html {
         } else {
             // show flyng position on map
             current.duration.set(current.duration.get() - speed);
+            let lat1 = current.from.borrow().lat();
+            let long1 = current.from.borrow().long();
+
+            let lat2 = current.to.borrow().lat();
+            let long2 = current.to.borrow().long();
+            let dist = distance(lat1, long1, lat2, long2);
+            let brng = bearing(lat1, long1, lat2, long2);
             let progress = 1.0 - current.duration.get() as f64 / current.max_duration as f64;
+            info!("Progress: {}", progress);
+            let (lat, long) = destination(lat1, long1, brng, dist * progress);
+
+            /*
             let from = current.from.borrow();
             let to = current.to.borrow();
             let lat = from.lat() + (to.lat() - from.lat()) * progress;
@@ -101,7 +118,10 @@ fn travelling() -> html {
             if diff > 180.0 {
                 long -= 360.0 * progress;
             }
-            //info!("Position: {}, {}", lat, long);
+            */
+
+            info!("Position: {}, {}", lat, long);
+
             eval(format!(
                 " document.circle.setLatLng([{},{}]);
                 document.map.setView([{}, {}, 5]) ",
@@ -143,11 +163,8 @@ impl Location {
             stats.visit(x);
             stats
         });
-        self.airport.borrow_mut().status = Visited::Visited;
+        // self.airport.borrow_mut().status = Visited::Visited;
         // Dispatch::<Options>::new().set(Default::default());
-    }
-    fn set_marker(&self) {
-        let airport = self.airport.borrow_mut();
     }
 }
 use std::ops::Deref;
@@ -213,7 +230,23 @@ impl Store for Options {
         true
     }
 }
+use great_circle::*;
 fn main() {
+    /*
+    let lat1 = 50.0;
+    let long1 = 8.0;
+    let lat2 = 37.0;
+    let long2 = -122.0;
+    let dist = distance(lat1, long1, lat2, long2);
+    println!("Distance is {}", dist);
+    let brng = bearing(lat1, long1, lat2, long2);
+    println!("Bearing: {}", brng);
+    let dest = destination(lat1, long1, brng, dist);
+    println!("SFO: {:?}", dest);
+    //    println!("{}", bearing(48.8567, 2.3508, 51.507222, -0.1275));
+    //    println!("{:?}", destination(48.8567, 2.3508, 330.035, 100.0));
+    // println!("{:?}", distance(51.507222, -0.1275, 48.8567, 2.3508));
+    */
     wasm_logger::init(wasm_logger::Config::default());
     // yew::Renderer::<model::Model>::new().render();
     yew::start_app::<Model>();
@@ -407,8 +440,9 @@ fn init_map() -> html {
     html! {}
 }
 fn show_options_for(airport: Mrc<Airport>) {
+    let airports = Dispatch::<Airports>::new().get();
     spawn_local(async move {
-        let airport = airport.borrow();
+        let iata_code = airport.borrow().iata_code.clone();
         // go on, inject yourself...
         let q = format!(
             "
@@ -417,7 +451,7 @@ fn show_options_for(airport: Mrc<Airport>) {
                 where dep_iata = '{}'
                 group by arr_iata
                 ;",
-            &airport.iata_code
+            iata_code
         );
         info!("Query: {}", q);
         let res = query(q);
@@ -426,6 +460,10 @@ fn show_options_for(airport: Mrc<Airport>) {
             info!("{}", res);
             panic!("Failed unwraping")
         });
+        let airport = airport.borrow();
+        airport
+            .lowest_neighbor_points
+            .set(airport.lowest_neighbor_points.get() + 1);
         x.iter_mut().for_each(|x| x.route_points());
 
         airport.points.set(airport.lowest_neighbor_points.get() + 1);
@@ -542,18 +580,22 @@ impl Store for Stats {
 }
 impl Stats {
     fn visit(&self, airport: Mrc<Airport>) {
-        if airport.borrow().status != Visited::Visited {
+        let mut airport = airport.borrow_mut();
+
+        if airport.status != Visited::Visited {
             self.visited_airports.set(self.visited_airports.get() + 1);
         }
+
+        airport.status = Visited::Visited;
+
         let new = self
             .visited_countries
             .borrow_mut()
-            .insert(airport.borrow().country_code.clone());
+            .insert(airport.country_code.clone());
         if new {
             eval(format!(
                 "var marker = L.marker([{}, {}]).addTo(document.map); ",
-                airport.borrow().lat,
-                airport.borrow().long
+                airport.lat, airport.long
             ));
             info!("Set marker");
             // let location = Dispatch::<Location>::new().get();
@@ -569,7 +611,8 @@ fn show_stats() -> html {
     let (stats, _) = use_store::<Stats>();
     let (_, _) = use_store::<Airports>();
     html! {
-        <p> {format!("Visited: {} airports, {} countries", stats.visited_airports.get(), stats.visited_countries.borrow().len())}
+        <p> {format!("Visited: {} airports, {} countries",
+            stats.visited_airports.get(), stats.visited_countries.borrow().len())}
         </p>
     }
 }
@@ -585,7 +628,7 @@ impl AutoClicker {
         if let Some(_) = interval.as_ref() {
             *interval = None;
         } else {
-            *interval = Some(Interval::new(3000, || {
+            *interval = Some(Interval::new(500, || {
                 let route = Dispatch::<Options>::new().get().options[0].clone();
                 let airports = Dispatch::<Airports>::new().get();
                 Dispatch::<Travels>::new().reduce_mut(|loc| {
