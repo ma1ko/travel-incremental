@@ -1,5 +1,3 @@
-fn main() {}
-
 // converted from https://github.com/mwgg/GreatCircle/blob/master/GreatCircle.py
 
 /*

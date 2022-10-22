@@ -102,25 +102,7 @@ fn travelling() -> html {
             let dist = distance(lat1, long1, lat2, long2);
             let brng = bearing(lat1, long1, lat2, long2);
             let progress = 1.0 - current.duration.get() as f64 / current.max_duration as f64;
-            info!("Progress: {}", progress);
             let (lat, long) = destination(lat1, long1, brng, dist * progress);
-
-            /*
-            let from = current.from.borrow();
-            let to = current.to.borrow();
-            let lat = from.lat() + (to.lat() - from.lat()) * progress;
-            let mut long = from.long() + (to.long() - from.long()) * progress;
-            // Fixing crossing the date line
-            let diff = to.long() - from.long();
-            if diff < -180.0 {
-                long += 360.0 * progress;
-            }
-            if diff > 180.0 {
-                long -= 360.0 * progress;
-            }
-            */
-
-            info!("Position: {}, {}", lat, long);
 
             eval(format!(
                 " document.circle.setLatLng([{},{}]);
