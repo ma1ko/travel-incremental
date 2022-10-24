@@ -18,7 +18,7 @@ async function query(query: string) {
         from: "inline",
         config: {
           serverMode: "full",
-          url: "/flights.db",
+          url: "./flights.db",
           requestChunkSize: 4096,
         },
       },
@@ -31,7 +31,6 @@ async function query(query: string) {
   }
 
   const result = await (window as any).worker.db.query(query);
-  console.log("It's really new!");
 
   return result;
 }
